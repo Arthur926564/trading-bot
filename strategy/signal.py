@@ -1,106 +1,111 @@
-"""
-strategy/signal.py
-
-This is YOUR layer — swap out the example logic with your actual strategy.
-The interface contract is simple:
-  - Input:  a Bar (latest prices + OHLCV for all symbols)
-  - Output: list of Signal objects (can be empty if no action needed)
-
-The example below implements a simple moving-average crossover.
-Replace `compute_signal()` with your own model.
-"""
-
-import logging
-from dataclasses import dataclass
-from enum import Enum
-from typing import TYPE_CHECKING
-from datetime import time as dtime
-
+import time
 import numpy as np
-
-if TYPE_CHECKING:
-    from data.market_data import Bar, MarketDataFeed
-
-log = logging.getLogger(__name__)
+from enum import Enum
+import logging
 
 
 class Direction(Enum):
-    LONG  = "long"
-    SHORT = "short"
-    FLAT  = "flat"   # close / no position
+    LONG = "long"
+    FLAT = "flat"
 
 
-@dataclass
 class Signal:
-    symbol: str
-    direction: Direction
-    strength: float       # 0.0 → 1.0, used for position sizing
-    reason: str = ""      # human-readable, good for logs and audit trail
+    def __init__(self, symbol: str, direction: Direction, strength: float, reason: str):
+        self.symbol = symbol
+        self.direction = direction
+        self.strength = strength
+        self.reason = reason
 
 
 class SignalGenerator:
-    """
-    Example: dual moving-average crossover.
-
-    Replace compute_signal() with your model's logic.
-    The rest of the plumbing (history management, per-symbol loop) stays the same.
-    """
-
-    def __init__(self, lookback: int = 20, threshold: float = 0.01):
+    def __init__(
+        self,
+        lookback: int = 20,
+        trend_window: int = 50,
+        threshold: float = 0.0015,
+        volatility_window: int = 20,
+        min_volatility: float = 0.0005,
+        cooldown: int = 300,
+        monitor_interval: int = 300,  # 5 minutes
+    ):
         self.lookback = lookback
-        self.threshold = threshold          # min % gap between MAs to trigger signal
+        self.trend_window = trend_window
+        self.threshold = threshold
+        self.volatility_window = volatility_window
+        self.min_volatility = min_volatility
+        self.cooldown = cooldown
+        self.monitor_interval = monitor_interval
 
+        self.last_trade_time = {}
+        self.last_monitor_time = {}
 
-    def on_bar(self, bar: "Bar") -> list[Signal]:
-        """Called once per bar. Returns signals for all symbols worth acting on."""
+    def _can_trade(self, symbol: str) -> bool:
+        return time.time() - self.last_trade_time.get(symbol, 0) > self.cooldown
+
+    def _should_monitor(self, symbol: str) -> bool:
+        return time.time() - self.last_monitor_time.get(symbol, 0) > self.monitor_interval
+
+    def generate(self, symbol: str, history: list[float], has_position: bool):
+        if len(history) < max(self.lookback + 1, self.trend_window, self.volatility_window):
+            return []
+
+        # Moving averages (previous vs now)
+        fast_prev = np.mean(history[-6:-1])
+        slow_prev = np.mean(history[-self.lookback-1:-1])
+
+        fast_now = np.mean(history[-5:])
+        slow_now = np.mean(history[-self.lookback:])
+
+        # Trend filter
+        trend_ma = np.mean(history[-self.trend_window:])
+        price = history[-1]
+
+        trend_up = price > trend_ma
+        trend_down = price < trend_ma
+
+        # Momentum
+        gap = (fast_now - slow_now) / slow_now
+        strong_momentum = abs(gap) > self.threshold
+
+        # Volatility
+        returns = np.diff(history[-self.volatility_window:])
+        volatility = np.std(returns)
+        enough_vol = volatility > self.min_volatility
+
+        # Cross detection
+        bull_cross = fast_prev <= slow_prev and fast_now > slow_now
+        bear_cross = fast_prev >= slow_prev and fast_now < slow_now
+
         signals = []
-        for symbol, price in bar.prices.items():
-            sig = self._compute_signal(symbol, price, bar)
-            if sig is not None:
-                signals.append(sig)
+
+        # ENTRY
+        if (
+            bull_cross
+            and trend_up
+            and enough_vol
+            and not has_position
+        ):
+            self.last_trade_time[symbol] = time.time()
+            signals.append(
+                Signal(symbol, Direction.LONG, 1.0, "Filtered MA bull cross")
+            )
+
+        # EXIT
+        elif bear_cross and has_position:
+            self.last_trade_time[symbol] = time.time()
+            signals.append(
+                Signal(symbol, Direction.FLAT, 1.0, "Filtered MA bear cross")
+            )
+
+        # MONITORING (always report every `monitor_interval`)
+        if self._should_monitor(symbol):
+            self.last_monitor_time[symbol] = time.time()
+            signals.append(
+                Signal(
+                    symbol,
+                    Direction.LONG if has_position else Direction.FLAT,
+                    min(abs(gap) / (self.threshold * 3 + 1e-8), 1.0),  # avoid divide by zero
+                    f"Monitor: price={price:.2f}, gap={gap:.4f}, trend={'up' if trend_up else 'down'}, vol={volatility:.4f}"
+                )
+            )
         return signals
-
-    # ------------------------------------------------------------------
-    # YOUR STRATEGY LIVES HERE
-    # Replace everything below with your own logic.
-    # You receive: symbol name, latest close price, full Bar object
-    # You return: a Signal or None
-    # ------------------------------------------------------------------
-
-    def _compute_signal(self, symbol: str, price: float, bar: "Bar") -> Signal | None:
-        """
-        Example: MA crossover. Fast MA crosses above slow MA → LONG, below → SHORT.
-
-        To plug in your own model:
-          1. Access bar.ohlcv[symbol] for full OHLCV data
-          2. Use your model's feature computation here
-          3. Return Signal(symbol, Direction.LONG/SHORT/FLAT, strength=0.0-1.0)
-        """
-        # Needs to be injected at construction or passed via bar.history
-        # For the example we use a synthetic price path
-        prices = self._get_history(symbol, bar)
-        if len(prices) < self.lookback:
-            return None  # not enough history yet
-
-        fast_ma = np.mean(prices[-5:])
-        slow_ma = np.mean(prices[-self.lookback:])
-        gap = (fast_ma - slow_ma) / slow_ma
-
-        if gap > self.threshold:
-            strength = min(abs(gap) / (self.threshold * 3), 1.0)
-            return Signal(symbol, Direction.LONG,  strength, f"MA cross +{gap:.2%}")
-
-        if gap < -self.threshold:
-            strength = min(abs(gap) / (self.threshold * 3), 1.0)
-            return Signal(symbol, Direction.SHORT, strength, f"MA cross {gap:.2%}")
-
-        return None  # in the dead zone, do nothing
-
-    def _get_history(self, symbol: str, bar: "Bar") -> list[float]:
-        """
-        In production, this would read from feed.history[symbol].
-        For simplicity here, bar.ohlcv history is accessed via a shared feed reference.
-        Wire this up in main.py by passing feed.get_price_series(symbol).
-        """
-        # Placeholder — replace with feed.get_price_series(symbol) in main.py
-        return []

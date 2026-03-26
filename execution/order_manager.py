@@ -13,6 +13,7 @@ This is the most critical layer. Bugs here cost real money.
 """
 
 import os
+import time
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -71,7 +72,16 @@ class OrderManager:
     # ------------------------------------------------------------------
 
     def _is_market_open(self) -> bool:
+        # Only check every 60 seconds
+        now = time.time()
+        if hasattr(self, '_clock_cache') and now - self._clock_cache_time < 60:
+            return self._clock_cache
+    
         clock = self._api.get_clock()
+        self._clock_cache = clock.is_open
+        self._clock_cache_time = now
+        log.info("[CLOCK] is_open=%s timestamp=%s next_open=%s next_close=%s",
+             clock.is_open, clock.timestamp, clock.next_open, clock.next_close)
         return clock.is_open
 
 

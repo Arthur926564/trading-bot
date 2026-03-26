@@ -48,10 +48,38 @@ class Portfolio:
     # Price updates (called every bar)
     # ------------------------------------------------------------------
 
+    def load_from_alpaca(self, alpaca_positions) -> None:
+        """
+        Initialize portfolio positions from Alpaca API.
+        """
+        for p in alpaca_positions:
+            symbol = p.symbol
+            qty = int(float(p.qty))  # Alpaca gives string
+            avg_price = float(p.avg_entry_price)
+
+            self._positions[symbol] = Position(
+                symbol=symbol,
+                qty=qty,
+                avg_entry_price=avg_price,
+                current_price=avg_price  # will be updated by market data
+            )
+
+            log.info(
+                "Loaded position: %s qty=%d entry=%.2f",
+                symbol, qty, avg_price
+            )
     def update_prices(self, prices: dict[str, float]) -> None:
         for symbol, price in prices.items():
             if symbol in self._positions:
                 self._positions[symbol].current_price = price
+            else:
+                self._positions[symbol] = Position(
+                    symbol=symbol,
+                    qty=0,
+                    avg_entry_price=price,
+                    current_price=price,
+            )
+        print(prices)
         self._update_peak()
 
     def current_price(self, symbol: str) -> float:
@@ -120,6 +148,21 @@ class Portfolio:
         if v > self._peak_value:
             self._peak_value = v
 
+    def has_position(self, symbol: str) -> bool:
+        pos = self._positions.get(symbol)
+
+        if pos is None:
+            return False
+
+        # Case 1: object with quantity
+        if hasattr(pos, "quantity"):
+            return pos.quantity > 0
+
+        # Case 2: raw number
+        if isinstance(pos, (int, float)):
+            return pos > 0
+
+        return False
     # ------------------------------------------------------------------
     # Logging
     # ------------------------------------------------------------------
