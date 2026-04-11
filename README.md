@@ -1,7 +1,9 @@
-# TFA Trading Bot
+# Quant Trading strategy
 
 A clean Python scaffold for a real algo trading system.
 Paper trade first. Always.
+
+This is a project I build using claude (I wouldn't say vibe coded but close), which run on a rasberry pi 24/7. The goal of this project was more to test reliability and how error handling works when having an "automated" strategy running continuously.
 
 ## Project structure
 
